@@ -19,34 +19,43 @@ function Ratings({ nextPage, stimOrder }) {
         setTrial(trial + 1);
     };
 
-    const updateFile = async () => {
+    useEffect(() => {
+        // Start recording when component mounts
+        fetch("/start_recording", {
+            method: "POST",
+        });
+
+        // Stop recording when component unmounts
+        return () => {
+            fetch("/stop_recording", {
+                method: "POST",
+            });
+        };
+    }, []);
+
+    const updateImage = async (imageId) => {
         try {
-            const response = await fetch("/write_img_data", {
+            await fetch("/update_image", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ img: currStim }),
+                body: JSON.stringify({ image_id: imageId }),
             });
-            const result = await response.text();
-            console.log(result);
         } catch (error) {
-            console.error(error);
+            console.error("Error updating image:", error);
         }
     };
 
     useEffect(() => {
-        /* Runs only when trial number updates */
         if (trial === stimOrder.length) {
             nextPage();
         } else {
-            setCurrStim(stimOrder[trial]);
+            const newStim = stimOrder[trial];
+            setCurrStim(newStim);
+            updateImage(newStim);
         }
-    }, [trial]);
-
-    useEffect(() => {
-        updateFile();
-    }, [currStim])
+    }, [trial, nextPage, stimOrder]); // Added missing dependencies
 
     return (
         <div>
