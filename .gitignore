@@ -27,7 +27,7 @@ node_modules/
 *.json
 
 # Images
-*.png
+#*.png
 *.jpg
 *.jpeg
 *.gif
