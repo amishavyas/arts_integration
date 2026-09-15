@@ -2,7 +2,7 @@ import React from "react";
 import { Container, Typography } from "@mui/material";
 import { Logos, StyledButton, Title } from "../StyledElements";
 
-const Consent = ({ nextPage }) => {
+const Consent = ({ nextPage, deviceConnected }) => {
     return (
         <Container component="main" maxWidth="md" align="center">
             <Logos />
@@ -30,7 +30,11 @@ const Consent = ({ nextPage }) => {
                 <li>You know you are free to withdrawal at any time.</li>
             </Typography>
 
-            <StyledButton handleClick={nextPage} text="BEGIN STUDY" />
+            <StyledButton
+                handleClick={nextPage}
+                text="BEGIN STUDY"
+                disabled={!deviceConnected}
+            />
         </Container>
     );
 };

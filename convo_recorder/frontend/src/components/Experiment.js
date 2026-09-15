@@ -2,9 +2,27 @@ import React, { useState, useEffect } from "react";
 import Consent from "./Consent";
 import Ratings from "./Ratings";
 import Debrief from "./Debrief";
+import { DeviceWarningBanner } from "../StyledElements";
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5001';
 
 function Experiment() {
     const [page, setPage] = useState(1);
+    const [deviceConnected, setDeviceConnected] = useState(null); // null = still checking
+
+    useEffect(() => {
+        const checkDeviceStatus = () => {
+            fetch(`${BACKEND_URL}/device_status`)
+                .then((res) => res.json())
+                .then((data) => setDeviceConnected(data.connected))
+                .catch(() => setDeviceConnected(false));
+        };
+
+        checkDeviceStatus();
+        const interval = setInterval(checkDeviceStatus, 3000);
+        return () => clearInterval(interval);
+    }, []);
+
     const unshuffledStim = [
         "img_01.png",
         "img_02.png",
@@ -70,7 +88,12 @@ function Experiment() {
         if (page !== 0) {
             switch (page) {
                 case 1:
-                    return <Consent nextPage={nextPage} />;
+                    return (
+                        <Consent
+                            nextPage={nextPage}
+                            deviceConnected={deviceConnected === true}
+                        />
+                    );
                 case 2:
                     return (
                         <Ratings nextPage={nextPage} stimOrder={stimOrder} />
@@ -82,7 +105,12 @@ function Experiment() {
         }
     };
 
-    return <div>{conditionalComponent()}</div>;
+    return (
+        <div>
+            {deviceConnected === false && <DeviceWarningBanner />}
+            {conditionalComponent()}
+        </div>
+    );
 }
 
 export default Experiment;
