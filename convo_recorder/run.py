@@ -56,7 +56,7 @@ def start_backend(test_mode=False):
                               creationflags=subprocess.CREATE_NEW_CONSOLE,
                               env=env)
     else:
-        proc = subprocess.Popen(['python3', 'app.py'], env=env)
+        proc = subprocess.Popen([sys.executable, 'app.py'], env=env)
     processes.append(proc)
     return proc
 
