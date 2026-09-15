@@ -48,7 +48,7 @@ const StyledBox = styledComponent.div`
     width: 45%;
 `;
 
-const StyledButton = ({ handleClick, text }) => {
+const StyledButton = ({ handleClick, text, disabled }) => {
     return (
         <Box
             style={{
@@ -60,14 +60,35 @@ const StyledButton = ({ handleClick, text }) => {
             <Button
                 onClick={handleClick}
                 variant="contained"
+                disabled={disabled}
                 style={{
                     color: "#212528",
                     fontSize: "15px",
-                    backgroundColor: "#e4d09e",
+                    backgroundColor: disabled ? "#cccccc" : "#e4d09e",
                 }}
             >
                 {text}
             </Button>
+        </Box>
+    );
+};
+
+const DeviceWarningBanner = () => {
+    return (
+        <Box
+            style={{
+                backgroundColor: "#c62828",
+                color: "white",
+                textAlign: "center",
+                padding: "16px",
+                fontSize: "20px",
+                fontWeight: "bold",
+                position: "sticky",
+                top: 0,
+                zIndex: 1000,
+            }}
+        >
+            NO AUDIO DEVICE CONNECTED — please connect the Scarlett interface to begin the study
         </Box>
     );
 };
@@ -124,4 +145,4 @@ const Title = ({ text }) => {
     );
 };
 
-export { Logos, StyledBox, StyledButton, StyledSlider, Title };
+export { Logos, StyledBox, StyledButton, StyledSlider, Title, DeviceWarningBanner };

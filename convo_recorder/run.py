@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 import os
@@ -36,21 +37,26 @@ def kill_process_and_children(proc_pid):
     except psutil.NoSuchProcess:
         pass
 
-def start_backend():
+def start_backend(test_mode=False):
     print("Starting backend server...")
     if is_port_in_use(BACKEND_PORT):
         print(f"Port {BACKEND_PORT} is in use. Attempting to kill the process...")
         kill_process_on_port(BACKEND_PORT)
-    
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     backend_path = os.path.join(script_dir, 'backend')
     os.chdir(backend_path)
-    
+
+    env = os.environ.copy()
+    if test_mode:
+        env['CONVO_RECORDER_TEST_MODE'] = '1'
+
     if sys.platform == 'win32':
-        proc = subprocess.Popen(['python', 'app.py'], 
-                              creationflags=subprocess.CREATE_NEW_CONSOLE)
+        proc = subprocess.Popen(['python', 'app.py'],
+                              creationflags=subprocess.CREATE_NEW_CONSOLE,
+                              env=env)
     else:
-        proc = subprocess.Popen(['python3', 'app.py'])
+        proc = subprocess.Popen([sys.executable, 'app.py'], env=env)
     processes.append(proc)
     return proc
 
@@ -63,12 +69,18 @@ def start_frontend():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     frontend_path = os.path.join(script_dir, 'frontend')
     os.chdir(frontend_path)
-    
+
+    # react-scripts opens its own browser tab by default; we open one
+    # explicitly below, so disable CRA's auto-open to avoid duplicates.
+    env = os.environ.copy()
+    env['BROWSER'] = 'none'
+
     if sys.platform == 'win32':
-        proc = subprocess.Popen(['npm', 'start'], 
-                              creationflags=subprocess.CREATE_NEW_CONSOLE)
+        proc = subprocess.Popen(['npm', 'start'],
+                              creationflags=subprocess.CREATE_NEW_CONSOLE,
+                              env=env)
     else:
-        proc = subprocess.Popen(['npm', 'start'])
+        proc = subprocess.Popen(['npm', 'start'], env=env)
     processes.append(proc)
     return proc
 
@@ -82,15 +94,21 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test', action='store_true',
+                         help='Reuse a single data/test/ session folder instead of '
+                              'creating a new numbered one each run.')
+    args = parser.parse_args()
+
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Store the absolute path of the original directory
     original_dir = os.path.abspath(os.getcwd())
-    
+
     try:
-        backend_proc = start_backend()
+        backend_proc = start_backend(test_mode=args.test)
         print("Waiting for backend to start...")
         time.sleep(5)
         

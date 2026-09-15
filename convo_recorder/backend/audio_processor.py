@@ -38,6 +38,21 @@ class AudioConfig:
     device_index: Optional[int] = None
     buffer_size: int = 20  # Number of blocks to buffer
 
+def find_scarlett_device():
+    """Look for a connected Focusrite Scarlett USB audio interface.
+
+    Returns (device_index, device_info) if found, otherwise (None, None).
+    Never raises - callers decide how to handle an absent device.
+    """
+    devices = sd.query_devices()
+    for i, device in enumerate(devices):
+        if ("Scarlett" in device["name"] and
+                "USB" in device["name"] and
+                device["max_input_channels"] > 0 and
+                "virtual" not in device["name"].lower()):
+            return i, device
+    return None, None
+
 def debug_print_audio_stats(stage: str, data: np.ndarray, sample_rate: int):
     """Helper function to print audio statistics at various stages."""
     duration = len(data) / sample_rate
@@ -150,18 +165,13 @@ class AudioProcessor:
             print("\nAvailable audio devices:")
             for i, device in enumerate(devices):
                 print(f"{i}: {device['name']} (in: {device['max_input_channels']}, out: {device['max_output_channels']})")
-                
-            for i, device in enumerate(devices):
-                # Look specifically for USB Scarlett and verify it's not a virtual device
-                if ("Scarlett" in device["name"] and 
-                    "USB" in device["name"] and 
-                    device["max_input_channels"] > 0 and
-                    "virtual" not in device["name"].lower()):
-                    self.config.device_index = i
-                    print(f"\nSelected Scarlett device: {device['name']}")
-                    print(f"Device details: {device}")
-                    break
-        
+
+            device_index, device_info = find_scarlett_device()
+            if device_index is not None:
+                self.config.device_index = device_index
+                print(f"\nSelected Scarlett device: {device_info['name']}")
+                print(f"Device details: {device_info}")
+
         if self.config.device_index is None:
             raise RuntimeError("Could not find Scarlett audio interface")
             
