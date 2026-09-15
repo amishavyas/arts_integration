@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from "react";
 import Consent from "./Consent";
-import DemoSurvey from "./DemoSurvey";
 import Ratings from "./Ratings";
 import Debrief from "./Debrief";
 
 function Experiment() {
     const [page, setPage] = useState(1);
-    const stimOrder = [
+    const unshuffledStim = [
         "img_01.png",
         "img_02.png",
         "img_03.png",
@@ -19,7 +18,32 @@ function Experiment() {
         "img_10.png",
         "img_11.png",
         "img_12.png",
+        "img_13.png",
+        "img_14.png",
+        "img_15.png",
+        "img_16.png",
+        "img_17.png",
+        "img_18.png",
+        "img_19.png",
+        "img_20.png",
+        "img_21.png",
+        "img_22.png",
+        "img_23.png",
+        "img_24.png",
+        "img_25.png"
     ];
+
+    function shuffleArray(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+      }
+ 
+    const stimOrder = shuffleArray(unshuffledStim);
+
+
     const [demoData, setDemoData] = useState({
         age: "",
         education: "",
@@ -52,14 +76,6 @@ function Experiment() {
                         <Ratings nextPage={nextPage} stimOrder={stimOrder} />
                     );
                 case 3:
-                    return (
-                        <DemoSurvey
-                            nextPage={nextPage}
-                            demoData={demoData}
-                            setDemoData={setDemoData}
-                        />
-                    );
-                case 4:
                     return <Debrief />;
                 default:
             }
