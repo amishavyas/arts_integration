@@ -34,11 +34,10 @@ node_modules/
 *.bmp
 *.tiff
 
-# .ipynb
-*.ipynb
-
-# .ipynb_checkpoints
-*.ipynb_checkpoints
+# Notebooks are tracked, but only with outputs stripped (nbstripout via
+# .gitattributes, checked by .pre-commit-config.yaml): outputs hold transcripts
+# and participant audio.
+.ipynb_checkpoints/
 
 # zip files
 *.zip
@@ -80,3 +79,32 @@ Thumbs.db
 *.pack
 node_modules/.cache/
 node_modules/.cache/*
+
+# --- Participant data: never commit (privacy) ---
+# Everything recorded or derived from recordings stays out of git: audio, video,
+# transcripts, and the tables/arrays built from them (embeddings, UMAPs). The
+# rules above already cover *.wav, *.mp3, *.ogg, *.m4a, *.flac, *.csv, *.json
+# and *.zip. Analysis code reads this data from outside the repo (analysis/scripts/paths.py).
+*.aac
+*.aiff
+*.opus
+*.wma
+*.webm
+*.mp4
+*.mov
+*.tsv
+*.xlsx
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.npz
+*.npy
+*.pt
+*.h5
+*.srt
+*.vtt
+*.txt
+!requirements*.txt
+!robots.txt
+analysis/data/

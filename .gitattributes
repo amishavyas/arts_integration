@@ -1,0 +1,4 @@
+# Strip notebook outputs (transcripts, participant audio) on `git add`; local
+# copies keep theirs. Needs `nbstripout --install` once per clone -- see analysis/README.md.
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb

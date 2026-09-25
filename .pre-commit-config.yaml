@@ -1,0 +1,17 @@
+# Install once per clone: pip install pre-commit nbstripout && pre-commit install && nbstripout --install
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+        # measured on the working copy, which keeps its outputs; notebooks are
+        # checked on their staged (stripped) version below instead
+        exclude: \.ipynb$
+  - repo: local
+    hooks:
+      - id: notebooks-stripped
+        name: notebooks have no outputs and are small
+        entry: python tools/check_staged_notebooks.py
+        language: python
+        files: \.ipynb$
