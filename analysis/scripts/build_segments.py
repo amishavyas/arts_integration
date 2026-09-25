@@ -16,19 +16,21 @@ sentence):
                         also recording, i.e. where voicolate could remove bleed;
                         the rest passed through un-isolated
     source_wav          the speaker's utterance WAV overlapping the segment most
-    audio_path          the isolated track; slice it with start/end
+    audio_path          the isolated track, relative to DATA_ROOT (scripts/paths.py);
+                        slice it with start/end
 
 Every stretch of a concat track is some utterance WAV placed at its data.csv
 timestamp, so a segment's source WAV is the same speaker's WAV it overlaps most,
 and that WAV's data.csv row gives the image. A segment WhisperX placed just outside
 every WAV (alignment drift) takes the nearest one.
 
-Run in the `base` env:
-    /safestore/users/landry/miniconda3/bin/python analysis/scripts/build_segments.py
+Run from the repo root in the `base` env (conda activate base):
+    python analysis/scripts/build_segments.py
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +39,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from concat_speaker_audio import utterance_layout  # noqa: E402
-from paths import DATA_DIR  # noqa: E402
+from paths import DATA_DIR, DATA_ROOT  # noqa: E402
 
 SPEAKERS = ["0", "1"]
 GRID_HZ = 100  # resolution of the partner-live computation
@@ -97,7 +99,7 @@ def build_session(session_dir: Path) -> pd.DataFrame | None:
                 "word_score": np.mean(scores) if scores else np.nan,
                 "partner_live_frac": partner[g0:g1].mean(),
                 "source_wav": src["wav"].name,
-                "audio_path": str(session_dir / f"{speaker}_isolated.wav"),
+                "audio_path": os.path.relpath(session_dir / f"{speaker}_isolated.wav", DATA_ROOT),
             })
 
     df = pd.DataFrame(rows).sort_values("start", ignore_index=True)

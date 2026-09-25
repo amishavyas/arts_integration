@@ -15,3 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DATA_ROOT = Path(os.environ.get("ARTS_DATA_ROOT", REPO.parent)).expanduser().resolve()
 DATA_DIR = DATA_ROOT / "data"
+
+# voicolate isn't pip-installed; by default it sits beside this project, at
+# SCRAP/packages/voicolate for SCRAP/projects/arts_integration/<repo>
+VOICOLATE_DIR = Path(os.environ.get("VOICOLATE_DIR", REPO.parents[2] / "packages" / "voicolate")).expanduser().resolve()

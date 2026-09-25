@@ -7,8 +7,8 @@ aggregated_segments_with_embeddings.csv, leaving the utterance-level
 aggregated_data_with_embeddings.csv alone. Embeddings are OLMo, emb_0 .. emb_4095,
 from text_embeddings.add_embeddings.
 
-Run in the `fusion` env:
-    /safestore/users/landry/miniconda3/envs/fusion/bin/python analysis/scripts/aggregate_segments.py
+Run from the repo root in the `fusion` env (conda activate fusion):
+    python analysis/scripts/aggregate_segments.py
 """
 
 import argparse

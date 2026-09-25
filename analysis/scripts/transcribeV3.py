@@ -4,8 +4,8 @@ For each session folder in data/, copies data.csv to data_v3.csv with the same
 columns and rows, replacing only `text` with a large-v3 transcript of the
 row's audio/utterance_*.wav. (The recorder transcribed with Whisper tiny.)
 
-Run with the whisperx env's interpreter:
-    /safestore/users/landry/miniconda3/envs/whisperx/bin/python analysis/scripts/transcribeV3.py
+Run from the repo root in the `whisperx` env (conda activate whisperx):
+    python analysis/scripts/transcribeV3.py
 
 Sessions that already have data_v3.csv are skipped unless --overwrite.
 """

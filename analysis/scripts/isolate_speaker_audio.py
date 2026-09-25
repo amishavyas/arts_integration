@@ -14,8 +14,8 @@ where only one mic was recording pass through untouched apart from the same
 calibration and output gain, so levels match across the splice; there is no
 second mic there to separate against.
 
-Run in the `base` env:
-    /safestore/users/landry/miniconda3/bin/python analysis/scripts/isolate_speaker_audio.py
+Run from the repo root in the `base` env (conda activate base):
+    python analysis/scripts/isolate_speaker_audio.py
     ... --sessions 020 021 --force
 """
 
@@ -29,12 +29,12 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-# voicolate isn't pip-installed; import it from its repo, as its own scripts do
-VOICOLATE_DIR = Path("/safestore/users/landry/SCRAP/packages/voicolate")
-sys.path.insert(0, str(VOICOLATE_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from concat_speaker_audio import utterance_layout  # noqa: E402
-from paths import DATA_DIR  # noqa: E402
+from paths import DATA_DIR, VOICOLATE_DIR  # noqa: E402
+
+# voicolate isn't pip-installed; import it from its repo, as its own scripts do
+sys.path.insert(0, str(VOICOLATE_DIR))
 
 SPEAKERS = ["0", "1"]
 

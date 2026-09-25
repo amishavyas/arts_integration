@@ -6,8 +6,8 @@ output, i.e. sentence-level `segments` (start, end, text, words) and a flat
 `word_segments` list. Times are seconds from the start of the track, which is
 the concat tracks' t=0 (t0 in isolation_params.json).
 
-Run with the whisperx env's interpreter:
-    /safestore/users/landry/miniconda3/envs/whisperx/bin/python analysis/scripts/transcribe_isolated.py
+Run from the repo root in the `whisperx` env (conda activate whisperx):
+    python analysis/scripts/transcribe_isolated.py
     ... --sessions 020 --overwrite
 
 Tracks that already have a transcript are skipped unless --overwrite.
