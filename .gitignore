@@ -2,6 +2,8 @@
 *.csv
 /data/
 /data/*
+/devdata/
+/devdata/*
 
 # Audio files
 *.mp3
@@ -109,5 +111,6 @@ node_modules/.cache/*
 !robots.txt
 analysis/data/
 
-# ignore data dir
+# ignore data dirs
 data/**
+devdata/**

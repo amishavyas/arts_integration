@@ -1,12 +1,19 @@
 import os
 from flask import Blueprint, request, jsonify
 from audio_processor import AudioProcessor, AudioConfig, find_scarlett_device
+from bank import resolve_bank_csv
 from session_manager import setup_session
 
 # Create blueprint
 audio_bp = Blueprint('audio', __name__)
 
 TEST_MODE = os.environ.get("CONVO_RECORDER_TEST_MODE") == "1"
+# Preflight dialog's "test / dev data" choice: numbered sessions under
+# devdata/ instead of data/, own counter. Independent of TEST_MODE above
+# (which is the CLI --test flag's single reused data/test/ folder).
+DEVDATA_MODE = os.environ.get("CONVO_RECORDER_DEVDATA") == "1"
+INTERVENTION_MODE = os.environ.get("CONVO_RECORDER_INTERVENTION_MODE", "1") == "1"
+ADD_TO_DATABASE = os.environ.get("CONVO_RECORDER_ADD_TO_DATABASE", "1") == "1"
 
 # Only touch the filesystem / audio hardware if a Scarlett is actually
 # connected. Without it, the server still starts (so the frontend can show
@@ -17,11 +24,16 @@ DEVICE_CONNECTED = device_index is not None
 
 audio_processor = None
 if DEVICE_CONNECTED:
-    session_dir, audio_dir = setup_session(test_mode=TEST_MODE)
+    session_dir, audio_dir = setup_session(test_mode=TEST_MODE, devdata=DEVDATA_MODE)
     audio_processor = AudioProcessor(
         session_dir=session_dir,
         audio_dir=audio_dir,
-        config=AudioConfig(device_index=device_index),
+        config=AudioConfig(
+            device_index=device_index,
+            add_to_database=ADD_TO_DATABASE,
+            intervention_enabled=INTERVENTION_MODE,
+            bank_csv=resolve_bank_csv(devdata=DEVDATA_MODE),
+        ),
     )
 else:
     print("WARNING: No Scarlett audio interface detected. "
@@ -33,6 +45,9 @@ def device_status():
         "connected": DEVICE_CONNECTED,
         "device_name": device_info["name"] if device_info else None,
         "test_mode": TEST_MODE,
+        "devdata_mode": DEVDATA_MODE,
+        "intervention_mode": INTERVENTION_MODE,
+        "add_to_database": ADD_TO_DATABASE,
     })
 
 @audio_bp.route('/start_recording', methods=['POST'])

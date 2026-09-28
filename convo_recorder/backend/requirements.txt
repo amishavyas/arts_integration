@@ -6,6 +6,10 @@ pandas
 scipy
 librosa
 torch
-openai-whisper
+mlx
+mlx-lm
+mlx-whisper
+silero-vad
+transformers
 pathlib
 psutil

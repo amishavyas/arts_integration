@@ -8,6 +8,8 @@ import signal
 import psutil
 import socket
 
+from preflight_dialog import show_preflight_dialog
+
 processes = []
 FRONTEND_PORT = 3001
 BACKEND_PORT = 5001
@@ -37,7 +39,7 @@ def kill_process_and_children(proc_pid):
     except psutil.NoSuchProcess:
         pass
 
-def start_backend(test_mode=False):
+def start_backend(test_mode=False, devdata=False, intervention_enabled=None, add_to_database=None):
     print("Starting backend server...")
     if is_port_in_use(BACKEND_PORT):
         print(f"Port {BACKEND_PORT} is in use. Attempting to kill the process...")
@@ -50,6 +52,12 @@ def start_backend(test_mode=False):
     env = os.environ.copy()
     if test_mode:
         env['CONVO_RECORDER_TEST_MODE'] = '1'
+    if devdata:
+        env['CONVO_RECORDER_DEVDATA'] = '1'
+    if intervention_enabled is not None:
+        env['CONVO_RECORDER_INTERVENTION_MODE'] = '1' if intervention_enabled else '0'
+    if add_to_database is not None:
+        env['CONVO_RECORDER_ADD_TO_DATABASE'] = '1' if add_to_database else '0'
 
     if sys.platform == 'win32':
         proc = subprocess.Popen(['python', 'app.py'],
@@ -107,8 +115,25 @@ def main():
     # Store the absolute path of the original directory
     original_dir = os.path.abspath(os.getcwd())
 
+    devdata = False
+    intervention_enabled = None
+    add_to_database = None
+    if not args.test:
+        print("Opening preflight dialog...")
+        choices = show_preflight_dialog()
+        if choices is None:
+            print("Preflight cancelled - not starting the experiment.")
+            return
+        devdata = choices["devdata"]
+        intervention_enabled = choices["intervention_enabled"]
+        add_to_database = choices["add_to_database"]
+        print(f"Preflight choices: devdata={devdata}, intervention_enabled={intervention_enabled}, "
+              f"add_to_database={add_to_database}")
+
     try:
-        backend_proc = start_backend(test_mode=args.test)
+        backend_proc = start_backend(test_mode=args.test, devdata=devdata,
+                                      intervention_enabled=intervention_enabled,
+                                      add_to_database=add_to_database)
         print("Waiting for backend to start...")
         time.sleep(5)
         
@@ -118,17 +143,54 @@ def main():
         print("Waiting for frontend to start...")
         time.sleep(3)
         
-        print("Opening in browser...")
-        webbrowser.open(f'http://localhost:{FRONTEND_PORT}')
-        
+        print("Opening in Safari...")
+        url = f'http://localhost:{FRONTEND_PORT}'
+        # Explicitly Safari, not whatever webbrowser.open() picks as the
+        # system default (Chrome here) - a backend crash was reliably
+        # reproducible with Chrome running and never happened with the
+        # backend alone, consistent with Metal/GPU contention between
+        # Chrome's renderer and MLX. Safari, being Apple's own browser, is
+        # the best first bet for avoiding that. Falls back to the system
+        # default if Safari can't be launched for some reason.
+        try:
+            subprocess.run(['open', '-a', 'Safari', url], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Could not open Safari specifically - falling back to the system default browser.")
+            webbrowser.open(url)
+
         print("\nApplication is running!")
         print("Press Ctrl+C to stop the application...")
-        
+
+        # The backend can occasionally crash from native audio-stack issues
+        # (Metal/CoreAudio contention with Chrome, observed during testing)
+        # that aren't Python bugs we can just catch. For a live installation,
+        # automatically restarting it beats leaving the show dark - it
+        # reloads models in a few seconds and the frontend's existing
+        # device_status polling naturally recovers once it's back up. Capped
+        # so a truly broken setup still surfaces instead of crash-looping
+        # forever.
+        MAX_BACKEND_RESTARTS = 5
+        RESTART_WINDOW_SECONDS = 300
+        restart_times = []
+
         # Monitor child processes
         while True:
             if backend_proc.poll() is not None:
-                print("\nBackend server stopped unexpectedly. Shutting down...")
-                break
+                now = time.time()
+                restart_times[:] = [t for t in restart_times if now - t < RESTART_WINDOW_SECONDS]
+                if len(restart_times) >= MAX_BACKEND_RESTARTS:
+                    print(f"\nBackend crashed {MAX_BACKEND_RESTARTS} times in "
+                          f"{RESTART_WINDOW_SECONDS}s - giving up on auto-restart. "
+                          "Please contact the researcher.")
+                    break
+                restart_times.append(now)
+                print(f"\nBackend stopped unexpectedly - restarting it automatically "
+                      f"({len(restart_times)}/{MAX_BACKEND_RESTARTS} restarts in this session)...")
+                backend_proc = start_backend(test_mode=args.test, devdata=devdata,
+                                              intervention_enabled=intervention_enabled,
+                                              add_to_database=add_to_database)
+                time.sleep(5)  # let it reload models before the next poll
+                continue
             if frontend_proc.poll() is not None:
                 print("\nFrontend server stopped unexpectedly. Shutting down...")
                 break

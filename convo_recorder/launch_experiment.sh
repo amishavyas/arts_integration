@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launches the latest dev version of the conversation-recorder experiment.
+# Launches the latest version of the conversation-recorder experiment.
 # This is the script the Desktop icon (Run Experiment.command) calls into.
 # Keeping the real logic here (in the repo) means it updates itself along
 # with everything else on `git pull` - the Desktop icon never needs to change.
@@ -17,14 +17,20 @@ fail() {
 
 cd "$REPO_DIR" || fail "Could not find the project folder at $REPO_DIR"
 
-echo "Checking for the latest version..."
-git fetch origin dev || fail "Could not reach GitHub to check for updates (check your internet connection)."
-git checkout dev || fail "Could not switch to the dev branch."
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+    fail "Not currently on a branch (detached HEAD) - can't tell what to update."
+fi
+
+echo "Checking for the latest version of '$CURRENT_BRANCH'..."
+git fetch origin "$CURRENT_BRANCH" || fail "Could not reach GitHub to check for updates (check your internet connection)."
 
 # --ff-only refuses to do anything if local changes would conflict with the
 # update, rather than silently overwriting or merging - safe to run even
-# while the researcher has work in progress in this same folder.
-git merge --ff-only origin/dev || fail "Could not update to the latest version - there may be unsaved local changes in this folder."
+# while the researcher has work in progress in this same folder. No branch
+# switch here on purpose: always updates whatever branch is already checked
+# out, so this never fights an in-progress branch change.
+git merge --ff-only "origin/$CURRENT_BRANCH" || fail "Could not update to the latest version - there may be unsaved local changes in this folder."
 
 if [ ! -x "$PYTHON_BIN" ]; then
     fail "Expected Python environment not found at $PYTHON_BIN"

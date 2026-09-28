@@ -1,5 +1,7 @@
+import math
 import sounddevice as sd
 import numpy as np
+import sys
 import threading
 import queue
 import time as tm
@@ -9,49 +11,95 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
-import whisper
+import mlx_whisper
 import pandas as pd
-from scipy.io.wavfile import write as wav_write
 import torch
+from scipy.io.wavfile import write as wav_write
 from scipy import signal
+from silero_vad import VADIterator, load_silero_vad
 import librosa
 
-# Suppress the FP16 warning from Whisper
+from audio_devices import find_scarlett_device  # noqa: F401  (re-exported for audio_endpoints.py)
+from bank import DEFAULT_BANK_CSV, UtteranceBank
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "analysis" / "scripts"))
+from text_embeddings import TextEmbedder  # noqa: E402  (needs the sys.path insert above)
+
+# Silero VAD runs as a PyTorch TorchScript model, called continuously from a
+# background thread. A real crash was traced (via a macOS diagnostic report)
+# directly into libtorch_cpu/libtorch_python with this unconstrained -
+# PyTorch spinning up its own multi-threaded worker pool per inference call
+# under concurrent load is a known instability source. Pin it before any
+# torch-backed model loads.
+torch.set_num_threads(1)
+
+# Suppress the FP16 warning some downstream libs still emit
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
 """
-The individual channels for the interface should be set to max volume. Set the master volume to the halfway point. 
+The individual channels for the interface should be set to max volume. Set the master volume to the halfway point.
+
+INCREMENTAL REBUILD - STEP 4 of 4 (final): playback added (mlx-whisper from
+step 1, Silero VAD from step 2, embedding/bank growth from step 3). This is
+the piece most likely to have been unstable - a second concurrent native
+audio stream - so it reuses lessons paid for earlier today rather than the
+original playback design:
+  - One persistent sd.OutputStream, opened once per session, never
+    torn down and recreated per clip. The original approach used
+    sd.play()/sd.stop() per clip, which repeatedly tears down and rebuilds
+    a native PortAudio stream - under concurrent MLX load this produced an
+    actual macOS crash report (malloc: "pointer being freed was not
+    allocated"). Interrupting a clip here is just swapping a buffer and an
+    index under a lock; the stream itself never closes until stop_session().
+  - playback_mute_seconds is a short, fixed-length input mute, deliberately
+    NOT scaled by clip duration (bank clips run up to ~30s; muting for a
+    whole clip's duration made the system deaf to speech for that whole
+    window after every single playback).
+  - Skips restarting playback if the newest match is literally the same
+    clip already playing.
+See CLAUDE.md for why this file is being rebuilt one piece at a time
+instead of all at once.
+
+VAD inference is real work (a neural net forward pass, ~every 32ms per
+channel) - too expensive to run safely inside PortAudio's real-time
+callback, which has a hard per-buffer deadline. So the callback here does
+only the minimum (copy the buffer onto a queue); _process_capture does the
+actual VAD/state-machine work on an ordinary thread with no such deadline.
 """
 
-# Set max number of threads for PyTorch
-torch.set_num_threads(1)
+DEFAULT_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
+DEFAULT_EMBED_MODEL = str(Path.home() / "models" / "olmo2-1b-4bit")
+
 
 @dataclass
 class AudioConfig:
     channels: int = 2
     device_sample_rate: int = 44100
     target_sample_rate: int = 16000  # Rate for Whisper
+    vad_sample_rate: int = 16000  # rate silero-vad expects (8000 or 16000 only)
     blocksize: int = 1024  # Increased from 512 for more stable timing
-    threshold: float = 0.02  
-    gap_seconds: float = 1.5
     min_utterance_seconds: float = 0.5
     device_index: Optional[int] = None
-    buffer_size: int = 20  # Number of blocks to buffer
+    preroll_seconds: float = 0.5  # raw audio kept before a detected speech onset
+    # VAD (silero). threshold is the speech-probability cutoff; min_silence_ms
+    # is how long below-threshold audio has to persist before an utterance is
+    # considered finished (silero's own hangover, no wall-clock gap timer
+    # needed); speech_pad_ms pads each side of the detected span.
+    vad_threshold: float = 0.5
+    vad_min_silence_ms: int = 600
+    vad_speech_pad_ms: int = 30
+    whisper_model: str = DEFAULT_WHISPER_MODEL
+    # Embedding + bank growth/search. embedder/bank are loaded if either
+    # add_to_database (grow the corpus) or intervention_enabled (search +
+    # play a match) is on - they share the same embedding step.
+    add_to_database: bool = True
+    intervention_enabled: bool = True
+    embed_model: str = DEFAULT_EMBED_MODEL
+    bank_csv: Optional[Path] = None
+    output_device_index: Optional[int] = None
+    playback_mute_seconds: float = 0.3  # fixed-length input-mute after playback starts
 
-def find_scarlett_device():
-    """Look for a connected Focusrite Scarlett USB audio interface.
-
-    Returns (device_index, device_info) if found, otherwise (None, None).
-    Never raises - callers decide how to handle an absent device.
-    """
-    devices = sd.query_devices()
-    for i, device in enumerate(devices):
-        if ("Scarlett" in device["name"] and
-                "USB" in device["name"] and
-                device["max_input_channels"] > 0 and
-                "virtual" not in device["name"].lower()):
-            return i, device
-    return None, None
 
 def debug_print_audio_stats(stage: str, data: np.ndarray, sample_rate: int):
     """Helper function to print audio statistics at various stages."""
@@ -74,18 +122,18 @@ class AudioProcessor:
     _stream = None
     _stream_lock = threading.Lock()  # Add dedicated stream lock
     _active_stream_thread = None  # Track which thread owns the stream
-    
+
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
             return cls._instance
-    
+
     def __init__(self, session_dir, audio_dir, config: Optional[AudioConfig] = None):
         # Only initialize once
         if hasattr(self, '_initialized'):
             return
-            
+
         self._initialized = True
         self.session_dir = session_dir
         self.audio_dir = audio_dir
@@ -93,50 +141,68 @@ class AudioProcessor:
         self.config = config or AudioConfig()
         self.output_dir = Path(audio_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Extract pair ID from session directory
         try:
             self.pair_id = int(Path(session_dir).name)
         except ValueError:
             print(f"Warning: Could not extract pair ID from session directory {session_dir}, using default value 1")
             self.pair_id = 1
-        
-        self.buffer_samples = self.config.blocksize
-        
-        # Initialize recording state with buffers
-        self.recording_state = {
-            0: {
-                "recording": False, 
-                "data": None, 
-                "last_active": 0, 
-                "start_time": None,
-                "buffer": np.zeros(self.buffer_samples),
-                "timing_buffer": []  # Add timing buffer
-            },
-            1: {
-                "recording": False, 
-                "data": None, 
-                "last_active": 0, 
-                "start_time": None,
-                "buffer": np.zeros(self.buffer_samples),
-                "timing_buffer": []  # Add timing buffer
-            }
-        }
-        
-        # Initialize queues for transcription and CSV writing
+
+        self.preroll_samples = int(self.config.device_sample_rate * self.config.preroll_seconds)
+
+        # Exact-ratio resampler (device_sample_rate -> vad_sample_rate), e.g.
+        # 44100 -> 16000 reduces to 160/441. resample_poly is used per-block,
+        # so an exact small ratio matters for cost.
+        g = math.gcd(self.config.vad_sample_rate, self.config.device_sample_rate)
+        self._resample_up = self.config.vad_sample_rate // g
+        self._resample_down = self.config.device_sample_rate // g
+
+        self.recording_state = {c: self._new_channel_state() for c in range(self.config.channels)}
+
+        # Queues: raw_audio_queue is the handoff from the real-time callback
+        # to _process_capture (see both) - bounded so a processing backlog
+        # drops old blocks instead of growing memory without limit.
+        self.raw_audio_queue = queue.Queue(maxsize=200)
         self.transcription_queue = queue.Queue()
         self.csv_queue = queue.Queue()
-        
+        self.embedding_queue = queue.Queue()
+
         self.current_image = None
         self.session_active = False
-        
+
         self._setup_audio_device()
-        self.model = whisper.load_model("tiny", device="cpu")
-        
+
+        # mlx-whisper caches its loaded model in a class-level attribute
+        # with no locking of its own, so concurrent calls from multiple
+        # threads aren't safe - this lock serializes them (paired with
+        # running a single transcription thread below). openai-whisper
+        # (pure PyTorch CPU) didn't have this constraint, which is why the
+        # original version of this file ran two transcription threads.
+        self.mlx_lock = threading.Lock()
+        print(f"Warming up whisper model: {self.config.whisper_model}")
+        with self.mlx_lock:
+            mlx_whisper.transcribe(np.zeros(self.config.target_sample_rate, dtype=np.float32),
+                                    path_or_hf_repo=self.config.whisper_model)
+
+        self.embedder = None
+        self.bank = None
+        if self.config.add_to_database or self.config.intervention_enabled:
+            print(f"Loading embedding model: {self.config.embed_model}")
+            self.embedder = TextEmbedder(model_name=self.config.embed_model)
+            self.bank = UtteranceBank(self.config.bank_csv or DEFAULT_BANK_CSV)
+
+        self.playback_queue = queue.Queue()
+        self.playback_active_until = 0.0  # input is ignored until this monotonic time
+        self._playback_lock = threading.Lock()
+        self._playback_buffer = np.zeros(0, dtype=np.int16)
+        self._playback_pos = 0
+        self._playback_key = None
+
         # Initialize output file path
         self.output_file = Path(self.csv_path)
         self.output_lock = threading.Lock()
-        
+
         # Create initial CSV if it doesn't exist
         if not self.output_file.exists():
             self._create_initial_csv()
@@ -174,7 +240,7 @@ class AudioProcessor:
 
         if self.config.device_index is None:
             raise RuntimeError("Could not find Scarlett audio interface")
-            
+
         # Verify the selected device
         device_info = sd.query_devices(self.config.device_index)
         print(f"\nUsing audio device: {device_info['name']}")
@@ -185,118 +251,95 @@ class AudioProcessor:
         if 'default_high_input_latency' in device_info:
             print(f"Default high input latency: {device_info['default_high_input_latency']}")
 
-    def _calculate_rms(self, data: np.ndarray) -> float:
-        """Calculate Root Mean Square of audio data."""
-        # Convert int32 to float32 for RMS calculation
-        float_data = data.astype(np.float32) / (2**31)  # Normalize by full 32-bit range
-        return np.sqrt(np.mean(np.square(float_data)))
+    def _new_channel_state(self):
+        return {
+            "recording": False,
+            "data": None,
+            "start_time": None,
+            "preroll": np.zeros(self.preroll_samples, dtype=np.int32),
+            "vad_resid": np.zeros(0, dtype=np.float32),
+            "vad": VADIterator(
+                load_silero_vad(),  # own model instance per channel - it carries
+                                    # recurrent state across calls, so two channels
+                                    # sharing one instance would corrupt each other
+                threshold=self.config.vad_threshold,
+                sampling_rate=self.config.vad_sample_rate,
+                min_silence_duration_ms=self.config.vad_min_silence_ms,
+                speech_pad_ms=self.config.vad_speech_pad_ms,
+            ),
+        }
 
     def _record_audio(self):
-        """Record audio from both channels."""
+        """Capture (and, if intervention is enabled, play back) audio via a
+        single full-duplex sd.Stream.
+
+        Input and output both default to the same physical Scarlett device.
+        An earlier version of this opened two separate streams (InputStream
+        + OutputStream) against that one device concurrently - each got its
+        own CoreAudio I/O thread, and running both under load produced a
+        real SIGSEGV (confirmed via macOS diagnostic reports, deep in the
+        sounddevice/PortAudio callback bridge) regardless of how carefully
+        either stream's lifecycle was managed. A single duplex stream is
+        PortAudio's standard pattern for simultaneous I/O on one device and
+        avoids that dual-stream contention entirely.
+        """
         current_thread = threading.current_thread()
-        
+
         with AudioProcessor._stream_lock:
             if AudioProcessor._stream is not None:
                 if AudioProcessor._active_stream_thread == current_thread:
                     return
                 else:
                     return
-            
+
             AudioProcessor._active_stream_thread = current_thread
-        
-        last_time = [tm.time()]
-        expected_interval = self.config.blocksize / self.config.device_sample_rate
-        first_callback = [True]
-        
-        def callback(indata, frames, time, status):
+
+        def callback(indata, outdata, frames, time, status):
             if not self.session_active:
                 raise sd.CallbackStop()
-            
-            current_time = tm.time()
-            interval = current_time - last_time[0]
-            
-            # Update timing buffer and calculate average interval
-            for channel in range(self.config.channels):
-                state = self.recording_state[channel]
-                state["timing_buffer"].append(interval)
-                if len(state["timing_buffer"]) > self.config.buffer_size:
-                    state["timing_buffer"].pop(0)
-            
-            last_time[0] = current_time
-            
             if status:
                 print(f"Status: {status}")
-            
-            for channel in range(self.config.channels):
-                channel_data = indata[:, channel]
-                rms = self._calculate_rms(channel_data)
-                state = self.recording_state[channel]
-                
-                # Start recording if above threshold
-                if rms > self.config.threshold and not state["recording"]:
-                    state["recording"] = True
-                    print(f'\nChannel {channel} starting recording')
-                    
-                    state["start_time"] = tm.time()
-                    state["data"] = channel_data.copy()
-                    state["last_active"] = tm.time()
-                
-                # If recording, append data
-                elif state["recording"]:
-                    state["data"] = np.concatenate([state["data"], channel_data])
-                    
-                    # Update last_active only if above threshold
-                    if rms > self.config.threshold:
-                        state["last_active"] = tm.time()
-                    
-                    # Check if we should stop recording
-                    if tm.time() - state["last_active"] > self.config.gap_seconds:
-                        # check if the recording has been going on for at least the minimum utterance time
-                        if tm.time() - state["start_time"] > self.config.min_utterance_seconds:
-                            audio_data = state["data"]
-                            
-                            print(f"\nChannel {channel} finished recording")
-                            
-                            # Convert to float32 and scale for int16
-                            float_data = audio_data.astype(np.float32) / (2**31)
-                            audio_int16 = (float_data * 32767).astype(np.int16)
-                            
-                            packet = {
-                                "channel": channel,
-                                "data": audio_int16,
-                                "sample_rate": self.config.device_sample_rate,
-                                "start_time": state["start_time"],
-                                "end_time": tm.time(),
-                                "image_id": self.current_image
-                            }
-                            
-                            self.transcription_queue.put(packet)
+            # Deliberately minimal: this runs on PortAudio's real-time
+            # callback thread, which has a hard per-call deadline
+            # (~blocksize/samplerate). VAD inference is too slow/GIL-heavy
+            # to do safely here - see _process_capture, which does the real
+            # work on an ordinary thread. indata is a PortAudio-owned buffer
+            # reused right after this returns, so it must be copied here,
+            # not just referenced.
+            try:
+                self.raw_audio_queue.put_nowait(indata.copy())
+            except queue.Full:
+                pass  # drop a block under extreme backlog rather than block the callback
 
-                        # Reset state
-                        state["recording"] = False
-                        state["data"] = None
-                        state["start_time"] = None
-                        state["buffer"] = np.zeros(self.buffer_samples)
-                else:
-                    # Update the rolling buffer
-                    state["buffer"] = channel_data
-        
+            if self.config.intervention_enabled:
+                with self._playback_lock:
+                    buf = self._playback_buffer
+                    pos = self._playback_pos
+                    n = min(frames, max(0, len(buf) - pos))
+                    if n > 0:
+                        outdata[:n, 0] = buf[pos:pos + n]
+                        self._playback_pos = pos + n
+                    if n < frames:
+                        outdata[n:, 0] = 0
+            else:
+                outdata.fill(0)
+
         try:
             with AudioProcessor._stream_lock:
                 if AudioProcessor._stream is not None:
                     return
-                    
-                AudioProcessor._stream = sd.InputStream(
-                    device=self.config.device_index,
-                    channels=self.config.channels,
+
+                out_device = self.config.output_device_index or self.config.device_index
+                AudioProcessor._stream = sd.Stream(
+                    device=(self.config.device_index, out_device),
+                    channels=(self.config.channels, 1),
                     samplerate=self.config.device_sample_rate,
                     blocksize=self.config.blocksize,
-                    dtype=np.int32,
+                    dtype=('int32', 'int16'),
                     latency='high',
                     callback=callback,
-                    prime_output_buffers_using_stream_callback=True
                 )
-                
+
             with AudioProcessor._stream:
                 while self.session_active:
                     tm.sleep(0.1)
@@ -306,6 +349,80 @@ class AudioProcessor:
                     AudioProcessor._stream = None
                     AudioProcessor._active_stream_thread = None
 
+    def _process_capture(self):
+        """Consumes raw blocks off raw_audio_queue (queued by the real-time
+        callback in _record_audio, which stays minimal on purpose) and does
+        the actual VAD/state-machine work here, on an ordinary thread with
+        no hard real-time deadline to miss."""
+        while self.session_active or not self.raw_audio_queue.empty():
+            try:
+                indata = self.raw_audio_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            if tm.time() >= self.playback_active_until:
+                for channel in range(self.config.channels):
+                    self._process_channel_block(channel, indata[:, channel])
+
+            self.raw_audio_queue.task_done()
+
+    def _process_channel_block(self, channel, channel_data):
+        """Feed one block's worth of raw samples for one channel through
+        VAD, updating that channel's recording state."""
+        state = self.recording_state[channel]
+
+        # Pre-roll: raw audio from just before speech is detected, so the
+        # segment we transcribe doesn't clip the first word. Grab it *before*
+        # appending the current block, so it never double-counts the block
+        # we're about to process.
+        preroll_before = state["preroll"]
+        state["preroll"] = np.concatenate([state["preroll"], channel_data])[-self.preroll_samples:]
+
+        float_block = channel_data.astype(np.float32) / (2 ** 31)
+        resampled = signal.resample_poly(float_block, self._resample_up, self._resample_down).astype(np.float32)
+        buf = np.concatenate([state["vad_resid"], resampled])
+        n_chunks = len(buf) // 512
+        events = [state["vad"](buf[i * 512:(i + 1) * 512]) for i in range(n_chunks)]
+        state["vad_resid"] = buf[n_chunks * 512:]
+
+        for event in events:
+            if event is None:
+                continue
+            if "start" in event and not state["recording"]:
+                state["recording"] = True
+                state["start_time"] = tm.time()
+                state["data"] = preroll_before.copy()
+                print(f"\nChannel {channel} starting recording")
+            elif "end" in event and state["recording"]:
+                self._finish_utterance(channel, state)
+
+        if state["recording"]:
+            state["data"] = np.concatenate([state["data"], channel_data])
+
+    def _finish_utterance(self, channel, state):
+        """VAD signaled the end of a speech span on this channel: package the
+        accumulated audio for transcription if it's long enough, then reset."""
+        if tm.time() - state["start_time"] > self.config.min_utterance_seconds:
+            audio_data = state["data"]
+            print(f"\nChannel {channel} finished recording")
+
+            float_data = audio_data.astype(np.float32) / (2 ** 31)
+            audio_int16 = (float_data * 32767).astype(np.int16)
+
+            packet = {
+                "channel": channel,
+                "data": audio_int16,
+                "sample_rate": self.config.device_sample_rate,
+                "start_time": state["start_time"],
+                "end_time": tm.time(),
+                "image_id": self.current_image,
+            }
+            self.transcription_queue.put(packet)
+
+        state["recording"] = False
+        state["data"] = None
+        state["start_time"] = None
+
     def _transcribe_audio(self):
         """Transcribe audio from the queue."""
         while self.session_active or not self.transcription_queue.empty():
@@ -313,7 +430,7 @@ class AudioProcessor:
                 packet = self.transcription_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-                
+
             try:
                 # Resample for transcription first
                 resampled_data = librosa.resample(
@@ -321,21 +438,22 @@ class AudioProcessor:
                     orig_sr=packet['sample_rate'],
                     target_sr=self.config.target_sample_rate
                 )
-                
+
                 # Attempt transcription before saving WAV
-                result = self.model.transcribe(resampled_data)
+                with self.mlx_lock:
+                    result = mlx_whisper.transcribe(resampled_data, path_or_hf_repo=self.config.whisper_model)
                 transcribed_text = result['text'].strip()
-                
+
                 # Only save WAV and create CSV entry if transcription produced text
                 if transcribed_text:
                     # Save audio to WAV file
                     timestamp = int(tm.time())
                     filename = f"utterance_{packet['channel']}_{timestamp}.wav"
                     filepath = self.output_dir / filename
-                    
+
                     # Write the original high-quality audio
                     wav_write(str(filepath), packet['sample_rate'], packet['data'])
-                    
+
                     output_row = {
                         "pairID": self.pair_id,  # Use extracted pair ID
                         "subID": packet["channel"],
@@ -344,18 +462,124 @@ class AudioProcessor:
                         "text": transcribed_text,
                         "timestamp": packet["start_time"]
                     }
-                    
+
                     # Add to CSV queue
                     self.csv_queue.put(output_row)
                     print(f"Channel {packet['channel']} transcribed: {transcribed_text}")
+
+                    if (self.config.add_to_database or self.config.intervention_enabled) and packet["image_id"]:
+                        self.embedding_queue.put({
+                            "text": transcribed_text,
+                            "image_id": packet["image_id"],
+                            "channel": packet["channel"],
+                            "start_time": packet["start_time"],
+                            "audio_path": str(filepath),
+                            "duration": len(packet["data"]) / packet["sample_rate"],
+                        })
                 else:
                     print(f"Channel {packet['channel']}: No speech detected in audio segment")
-                    
+
             except Exception as e:
                 print(f"Error processing audio: {e}")
-                
+
             finally:
                 self.transcription_queue.task_done()
+
+    def _embed_and_add(self):
+        """Embed each transcript, optionally add it to the bank (so later
+        sessions can match against it), and optionally look up the closest
+        same-image, different-pair utterance to play back. Independent:
+        add_to_database controls whether the corpus grows; intervention_enabled
+        controls whether we search it."""
+        while self.session_active or not self.embedding_queue.empty():
+            try:
+                item = self.embedding_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            try:
+                with self.mlx_lock:
+                    vec = self.embedder.embed([item["text"]])[0]
+
+                if self.config.add_to_database:
+                    self.bank.add_utterance(vec, {
+                        "pairID": self.pair_id,
+                        "subID": item["channel"],
+                        "imgID": item["image_id"],
+                        "text": item["text"],
+                        "start": 0.0,
+                        "end": item["duration"],
+                        "timestamp": item["start_time"],
+                        "audio_path": item["audio_path"],
+                    })
+                    print(f"[bank] added utterance for {item['image_id']}: \"{item['text'][:60]}\"")
+
+                if self.config.intervention_enabled:
+                    match = self.bank.find_match(vec, item["image_id"], exclude_pair_id=self.pair_id)
+                    if match is not None:
+                        print(f"[intervention] match (sim={match['similarity']:.2f}): \"{match['text'][:60]}\"")
+                        self.playback_queue.put({"match": match})
+                    else:
+                        print(f"[intervention] no cross-pair match yet for {item['image_id']}")
+
+            except Exception as e:
+                print(f"Error embedding/matching: {e}")
+
+            finally:
+                self.embedding_queue.task_done()
+
+    def _playback(self):
+        """Play back matched utterances by swapping the buffer that the
+        duplex stream's callback (in _record_audio) reads from - no
+        separate output stream to manage here. Always plays the newest match and
+        interrupts whatever's currently playing rather than queuing a
+        backlog - a reaction that plays 20s late (behind one long clip)
+        breaks the "immediate" effect far worse than skipping it would.
+        Skips restarting if the newest match is literally the same clip
+        already playing."""
+        while self.session_active or not self.playback_queue.empty():
+            try:
+                item = self.playback_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            dropped = 0
+            while True:
+                try:
+                    newer = self.playback_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self.playback_queue.task_done()
+                item = newer
+                dropped += 1
+            if dropped:
+                print(f"[playback] dropped {dropped} stale match(es), playing the newest")
+
+            try:
+                match = item["match"]
+                key = (match["audio_path"], match["start"], match["end"])
+                if key == self._playback_key:
+                    print("[playback] newest match is the clip already playing - not restarting")
+                else:
+                    audio, rate = self.bank.load_audio(match)
+                    if rate != self.config.device_sample_rate:
+                        print(f"[playback] WARNING: clip rate {rate} != device rate "
+                              f"{self.config.device_sample_rate}, will play pitched/sped up")
+                    duration = len(audio) / rate
+
+                    with self._playback_lock:
+                        self._playback_buffer = audio
+                        self._playback_pos = 0
+                        self._playback_key = key
+                    self.playback_active_until = tm.time() + self.config.playback_mute_seconds
+
+                    print(f"[playback] playing {duration:.1f}s clip")
+
+            except Exception as e:
+                print(f"Error playing back: {e}")
+
+            finally:
+                self.playback_queue.task_done()
 
     def _csv_writer(self):
         """Write transcribed data to CSV."""
@@ -364,7 +588,7 @@ class AudioProcessor:
                 row = self.csv_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-                
+
             try:
                 # Only write to CSV if there's actual text content
                 if row['text'] and row['text'].strip():  # Check if text exists and isn't just whitespace
@@ -376,81 +600,97 @@ class AudioProcessor:
                             df = pd.DataFrame(columns=[
                                 "pairID", "subID", "imgID", "audio_path", "text", "timestamp"
                             ])
-                        
+
                         # Append new row
                         df = pd.concat([
                             df,
                             pd.DataFrame([row])
                         ], ignore_index=True)
-                        
+
                         # Save back to CSV
                         df.to_csv(self.output_file, index=False)
                         print(f"Saved new row to CSV: {row}")
                 else:
                     print("Skipping empty transcription")
-            
+
             except Exception as e:
                 print(f"Error writing to CSV: {e}")
-            
+
             finally:
                 self.csv_queue.task_done()
 
     def start_session(self):
         """Start recording and transcription threads."""
-        # Initialize/reset recording state
-        for channel in range(self.config.channels):
-            self.recording_state[channel] = {
-                "recording": False,
-                "data": None,
-                "last_active": 0,
-                "start_time": None,
-                "buffer": np.zeros(self.buffer_samples),
-                "timing_buffer": []
-            }
-        
+        self.recording_state = {c: self._new_channel_state() for c in range(self.config.channels)}
         self.session_active = True
-        
+
         # Start recording thread (only one)
         self.record_thread = threading.Thread(target=self._record_audio, name="RecordingThread")
         self.record_thread.start()
-        
-        # Start transcription threads (these should only transcribe, not record)
-        self.transcribe_threads = []
-        for i in range(2):  # Two transcription threads
-            thread = threading.Thread(target=self._transcribe_audio, name=f"TranscriptionThread-{i}")
-            thread.daemon = True
-            thread.start()
-            self.transcribe_threads.append(thread)
-        
+
+        self.capture_thread = threading.Thread(target=self._process_capture, name="CaptureProcessThread")
+        self.capture_thread.daemon = True
+        self.capture_thread.start()
+
+        # One transcription thread, not two - see the mlx_lock comment in
+        # __init__ for why (mlx-whisper's model cache isn't safe for
+        # concurrent calls from multiple threads).
+        self.transcribe_thread = threading.Thread(target=self._transcribe_audio, name="TranscriptionThread")
+        self.transcribe_thread.daemon = True
+        self.transcribe_thread.start()
+
         # Start CSV writer thread
         self.csv_thread = threading.Thread(target=self._csv_writer, name="CSVWriterThread")
         self.csv_thread.daemon = True
         self.csv_thread.start()
-            
+
+        self.embed_thread = None
+        if self.config.add_to_database or self.config.intervention_enabled:
+            self.embed_thread = threading.Thread(target=self._embed_and_add, name="EmbedThread")
+            self.embed_thread.daemon = True
+            self.embed_thread.start()
+
+        self.playback_thread = None
+        if self.config.intervention_enabled:
+            self.playback_thread = threading.Thread(target=self._playback, name="PlaybackThread")
+            self.playback_thread.daemon = True
+            self.playback_thread.start()
+
     def stop_session(self):
         """Stop all threads and cleanup."""
         self.session_active = False
-        
-        # Close the stream if it exists
-        with AudioProcessor._stream_lock:
-            if AudioProcessor._stream is not None:
-                try:
-                    AudioProcessor._stream.close()
-                except:
-                    pass
-                AudioProcessor._stream = None
-                AudioProcessor._active_stream_thread = None
-        
+
+        # Deliberately NOT closing AudioProcessor._stream here. _record_audio
+        # holds it in a `with AudioProcessor._stream:` block, whose __exit__
+        # already closes it (and its own finally clause clears the class
+        # attributes) once session_active goes False and that loop notices.
+        # Closing it here too would be a double-close on the same native
+        # PortAudio stream object.
+
         # Wait for recording to finish
         if hasattr(self, 'record_thread'):
             self.record_thread.join()
-        
+
+        self.raw_audio_queue.join()
         # Wait for transcription queue to empty
         self.transcription_queue.join()
-        
+
+        if hasattr(self, 'capture_thread'):
+            self.capture_thread.join(timeout=3.0)
+        if hasattr(self, 'transcribe_thread'):
+            self.transcribe_thread.join(timeout=3.0)
+
         # Wait for CSV queue to empty
         self.csv_queue.join()
-        
+
+        self.embedding_queue.join()
+        if getattr(self, 'embed_thread', None) is not None:
+            self.embed_thread.join(timeout=3.0)
+
+        self.playback_queue.join()
+        if getattr(self, 'playback_thread', None) is not None:
+            self.playback_thread.join(timeout=3.0)
+
         # Clean up orphaned audio files
         self.cleanup_orphaned_audio()
 
@@ -464,17 +704,17 @@ class AudioProcessor:
         try:
             # Read the CSV file
             df = pd.read_csv(self.csv_path)
-            
+
             # Get all audio paths from CSV
             valid_audio_paths = set(df['audio_path'].values)
-            
+
             # Get all wav files in the audio directory
             audio_dir = Path(self.audio_dir)
             all_audio_files = set(str(f) for f in audio_dir.glob('*.wav'))
-            
+
             # Find orphaned files (files that exist but aren't in CSV)
             orphaned_files = all_audio_files - valid_audio_paths
-            
+
             # Delete orphaned files
             for file_path in orphaned_files:
                 try:
@@ -482,22 +722,22 @@ class AudioProcessor:
                     print(f"Deleted orphaned audio file: {file_path}")
                 except Exception as e:
                     print(f"Error deleting {file_path}: {e}")
-                
+
             if orphaned_files:
                 print(f"Cleaned up {len(orphaned_files)} orphaned audio files")
             else:
                 print("No orphaned audio files found")
-                
+
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     print("Starting audio processor...")
     processor = AudioProcessor("session_dir", "audio_outputs2")
-    
+
     processor.start_session()
     print("Session started")
- 
+
     tm.sleep(30)
 
     processor.stop_session()
