@@ -99,6 +99,7 @@ class AudioConfig:
     bank_csv: Optional[Path] = None
     output_device_index: Optional[int] = None
     playback_mute_seconds: float = 0.3  # fixed-length input-mute after playback starts
+    max_playback_seconds: float = 7.0  # bank clips longer than this are never played back
 
 
 def debug_print_audio_stats(stage: str, data: np.ndarray, sample_rate: int):
@@ -515,7 +516,8 @@ class AudioProcessor:
                     print(f"[bank] added utterance for {item['image_id']}: \"{item['text'][:60]}\"")
 
                 if self.config.intervention_enabled:
-                    match = self.bank.find_match(vec, item["image_id"], exclude_pair_id=self.pair_id)
+                    match = self.bank.find_match(vec, item["image_id"], exclude_pair_id=self.pair_id,
+                                                  max_duration_seconds=self.config.max_playback_seconds)
                     if match is not None:
                         print(f"[intervention] match (sim={match['similarity']:.2f}): \"{match['text'][:60]}\"")
                         self.playback_queue.put({"match": match})

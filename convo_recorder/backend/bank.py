@@ -70,13 +70,18 @@ class UtteranceBank:
         self.embeddings = X / norms
         print(f"UtteranceBank: {len(self.meta)} rows, {X.shape[1]}-dim, from {self.csv_path}")
 
-    def find_match(self, query_embedding: np.ndarray, img_id: str, exclude_pair_id) -> pd.Series | None:
-        """Best cosine match for query_embedding among rows with the same img_id and a
-        different pairID than exclude_pair_id. None if there's no candidate row."""
+    def find_match(self, query_embedding: np.ndarray, img_id: str, exclude_pair_id,
+                    max_duration_seconds: float | None = None) -> pd.Series | None:
+        """Best cosine match for query_embedding among rows with the same img_id, a
+        different pairID than exclude_pair_id, and (if given) a clip no longer than
+        max_duration_seconds. None if there's no candidate row."""
         q = np.asarray(query_embedding, dtype=np.float32)
         q = q / np.linalg.norm(q)
 
         candidate = (self.meta["imgID"] == img_id) & (self.meta["pairID"] != exclude_pair_id)
+        if max_duration_seconds is not None:
+            duration = self.meta["end"] - self.meta["start"]
+            candidate = candidate & (duration <= max_duration_seconds)
         if not candidate.any():
             return None
 
