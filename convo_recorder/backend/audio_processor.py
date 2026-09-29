@@ -101,7 +101,7 @@ class AudioConfig:
     output_device_index: Optional[int] = None
     playback_mute_seconds: float = 0.3  # fixed-length input-mute after playback starts
     max_playback_seconds: float = 7.0  # bank clips longer than this are never played back
-    murmur_volume: float = 0.15  # 0-1 scale factor for the continuous background murmur
+    murmur_volume: float = 3.0  # 0-1 scale factor for the continuous background murmur
 
 
 def debug_print_audio_stats(stage: str, data: np.ndarray, sample_rate: int):

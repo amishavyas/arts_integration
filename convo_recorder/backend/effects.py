@@ -20,27 +20,43 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 EFFECTS_DIR = REPO / "data" / "effects"
 MURMURS_DIR = EFFECTS_DIR / "murmurs"
-MURMUR_FILE = MURMURS_DIR / "layered_murmur_10layers.wav"
+MURMUR_FILE = MURMURS_DIR / "murmurs_tonal.wav"
+MURMUR_MAX_SECONDS = 180  # loop a bounded prefix rather than holding the whole file in RAM
 SOLO_FX_DIR = EFFECTS_DIR / "solo_fx"
 SOLO_FX_INDEX_CSV = SOLO_FX_DIR / "index.csv"
 
 
-def load_audio_file(path: Path) -> tuple[np.ndarray, int]:
-    """Read a whole mono WAV file -> (int16 samples, sample rate)."""
+def load_audio_file(path: Path, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
+    """Read a WAV file (or just its first max_seconds, if given) -> (int16
+    mono samples, sample rate). Downmixes to mono (channel average) if the
+    file isn't already mono - the installation's output is a single mono
+    channel, and effects files aren't guaranteed to be recorded/generated
+    mono. max_seconds limits how many frames are ever read off disk, so a
+    long file's full length never gets materialized in memory just to be
+    truncated afterwards."""
     with wave.open(str(path)) as w:
         rate = w.getframerate()
-        data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        channels = w.getnchannels()
+        n_frames = w.getnframes()
+        if max_seconds is not None:
+            n_frames = min(n_frames, int(max_seconds * rate))
+        data = np.frombuffer(w.readframes(n_frames), dtype=np.int16)
+        if channels > 1:
+            data = data.reshape(-1, channels).mean(axis=1).astype(np.int16)
     return data, rate
 
 
 def load_murmur() -> tuple[np.ndarray, int]:
-    """Load the background murmur -> (int16 mono samples, sample rate).
-    Loaded once per session and looped."""
+    """Load (up to MURMUR_MAX_SECONDS of) the background murmur -> (int16
+    mono samples, sample rate). Loaded once per session and looped - capped
+    rather than loading the whole file, since this machine's memory budget
+    is tight enough that a large in-RAM buffer has previously contributed to
+    instability elsewhere in this pipeline (see CLAUDE.md)."""
     if not MURMUR_FILE.exists():
         raise FileNotFoundError(f"Murmur file not found: {MURMUR_FILE}")
-    data, rate = load_audio_file(MURMUR_FILE)
+    data, rate = load_audio_file(MURMUR_FILE, max_seconds=MURMUR_MAX_SECONDS)
     print(f"[effects] background murmur for this session: {MURMUR_FILE.name} "
-          f"({len(data) / rate:.0f}s, loops)")
+          f"({len(data) / rate:.0f}s loaded, loops)")
     return data, rate
 
 

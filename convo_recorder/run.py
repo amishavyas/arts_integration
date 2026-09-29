@@ -19,9 +19,13 @@ def is_port_in_use(port):
         return s.connect_ex(('localhost', port)) == 0
 
 def kill_process_on_port(port):
-    for proc in psutil.process_iter(['pid', 'name', 'connections']):
+    # psutil renamed Process.connections() -> net_connections() (the old
+    # name is deprecated and, as of psutil 6.x, no longer a valid attrs key
+    # for process_iter/as_dict at all - only requesting 'pid'/'name' there
+    # and calling net_connections() directly avoids depending on either).
+    for proc in psutil.process_iter(['pid', 'name']):
         try:
-            for conn in proc.connections():
+            for conn in proc.net_connections():
                 if conn.laddr.port == port:
                     print(f"Killing process {proc.pid} on port {port}")
                     kill_process_and_children(proc.pid)
