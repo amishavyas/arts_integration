@@ -21,7 +21,7 @@ import librosa
 
 from audio_devices import find_scarlett_device  # noqa: F401  (re-exported for audio_endpoints.py)
 from bank import DEFAULT_BANK_CSV, UtteranceBank
-from effects import SoloFxIndex, load_audio_file, load_murmur
+from effects import DEFAULT_MURMUR_FILENAME, SoloFxIndex, load_audio_file, load_murmur
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "analysis" / "scripts"))
@@ -101,7 +101,15 @@ class AudioConfig:
     output_device_index: Optional[int] = None
     playback_mute_seconds: float = 0.3  # fixed-length input-mute after playback starts
     max_playback_seconds: float = 7.0  # bank clips longer than this are never played back
-    murmur_volume: float = 3.0  # 0-1 scale factor for the continuous background murmur
+    # max_match_distance: float = 0.0584  # skip playback if the best match's cosine distance exceeds this
+    max_match_distance: float = 1.0  # skip playback if the best match's cosine distance exceeds this
+                                         # (measured against the current bank: ~50% hit rate at this value)
+    murmur_volume: float = 0.3  # 0-1 scale factor for the continuous background murmur
+    murmur_loop_restart_seconds: float = 60.0  # on loop wrap, jump here instead of back to 0
+    use_solo_fx: bool = False  # if True, play a matched row's pre-generated "interference"
+                                # version (data/effects/solo_fx) instead of its raw clip
+    murmur_file: Optional[str] = DEFAULT_MURMUR_FILENAME  # filename in data/effects/murmurs/,
+                                                           # or None to disable the murmur entirely
 
 
 def debug_print_audio_stats(stage: str, data: np.ndarray, sample_rate: int):
@@ -205,13 +213,25 @@ class AudioProcessor:
         self.solo_fx = None
         self._murmur_buffer = np.zeros(0, dtype=np.int16)
         self._murmur_pos = 0
+        self._murmur_loop_start = 0
         if self.config.intervention_enabled:
             self.solo_fx = SoloFxIndex()
-            murmur, murmur_rate = load_murmur()
-            if murmur_rate != self.config.device_sample_rate:
-                print(f"[effects] WARNING: murmur rate {murmur_rate} != device rate "
-                      f"{self.config.device_sample_rate}, will play pitched/sped up")
-            self._murmur_buffer = murmur
+            if self.config.murmur_file:
+                murmur, murmur_rate = load_murmur(self.config.murmur_file)
+                if murmur_rate != self.config.device_sample_rate:
+                    print(f"[effects] WARNING: murmur rate {murmur_rate} != device rate "
+                          f"{self.config.device_sample_rate}, will play pitched/sped up")
+                self._murmur_buffer = murmur
+                # On loop wrap, jump to this offset instead of back to sample 0,
+                # so the loop restart isn't a recognizable "starts right back at
+                # the beginning" cue. Clamped so a short/misconfigured buffer
+                # can't push this past the buffer's own length.
+                self._murmur_loop_start = min(
+                    int(self.config.murmur_loop_restart_seconds * murmur_rate),
+                    max(0, len(murmur) - 1),
+                )
+            else:
+                print("[effects] background murmur disabled")
 
         # Initialize output file path
         self.output_file = Path(self.csv_path)
@@ -284,25 +304,28 @@ class AudioProcessor:
         }
 
     def _next_murmur_chunk(self, frames):
-        """Next `frames` samples of the looping background murmur, wrapping
-        at the end. Runs on the real-time callback thread - plain array
-        slicing only, no lock needed (only that callback ever touches
-        _murmur_pos)."""
+        """Next `frames` samples of the looping background murmur. Plays
+        through to the end once, then on every wrap jumps to
+        _murmur_loop_start rather than back to sample 0 (see __init__), so
+        the loop restart isn't a recognizable "back to the very beginning"
+        cue. Runs on the real-time callback thread - plain array slicing
+        only, no lock needed (only that callback ever touches _murmur_pos)."""
         buf = self._murmur_buffer
         n = len(buf)
         if n == 0:
             return np.zeros(frames, dtype=np.int16)
         pos = self._murmur_pos
         end = pos + frames
-        if end <= n:
+        if end < n:
             chunk = buf[pos:end]
-            self._murmur_pos = end % n
+            self._murmur_pos = end
         else:
             first = buf[pos:n]
             remaining = frames - len(first)
-            second = buf[0:remaining]
+            loop_start = self._murmur_loop_start
+            second = buf[loop_start:loop_start + remaining]
             chunk = np.concatenate([first, second])
-            self._murmur_pos = remaining
+            self._murmur_pos = loop_start + remaining
         return chunk
 
     def _record_audio(self):
@@ -560,12 +583,14 @@ class AudioProcessor:
 
                 if self.config.intervention_enabled:
                     match = self.bank.find_match(vec, item["image_id"], exclude_pair_id=self.pair_id,
-                                                  max_duration_seconds=self.config.max_playback_seconds)
+                                                  max_duration_seconds=self.config.max_playback_seconds,
+                                                  max_distance=self.config.max_match_distance)
                     if match is not None:
                         print(f"[intervention] match (sim={match['similarity']:.2f}): \"{match['text'][:60]}\"")
                         self.playback_queue.put({"match": match})
                     else:
-                        print(f"[intervention] no cross-pair match yet for {item['image_id']}")
+                        print(f"[intervention] no match within distance {self.config.max_match_distance} "
+                              f"for {item['image_id']}")
 
             except Exception as e:
                 print(f"Error embedding/matching: {e}")
@@ -607,7 +632,7 @@ class AudioProcessor:
                     print("[playback] newest match is the clip already playing - not restarting")
                 else:
                     fx_path = self.solo_fx.path_for(match["audio_path"], match["start"], match["end"]) \
-                        if self.solo_fx else None
+                        if (self.config.use_solo_fx and self.solo_fx) else None
                     if fx_path is not None and fx_path.exists():
                         audio, rate = load_audio_file(fx_path)
                         print(f"[playback] using solo_fx: {fx_path.name}")

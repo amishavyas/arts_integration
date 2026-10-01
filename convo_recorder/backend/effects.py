@@ -1,7 +1,8 @@
 """Playback effects for the installation:
 
-- A continuous, low-volume background murmur (MURMUR_FILE), looped for the
-  whole session.
+- A continuous, low-volume background murmur, looped for the whole session.
+  The preflight dialog lets the RA pick which file from data/effects/murmurs/
+  (or none at all) - see list_murmur_files() and load_murmur().
 - Pre-generated "interference" (solo_fx) versions of bank utterances,
   played instead of the raw clip whenever one exists for the matched row -
   data/effects/solo_fx/index.csv maps a row's (audio_path, start, end) to
@@ -20,10 +21,16 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 EFFECTS_DIR = REPO / "data" / "effects"
 MURMURS_DIR = EFFECTS_DIR / "murmurs"
-MURMUR_FILE = MURMURS_DIR / "murmurs_tonal.wav"
+DEFAULT_MURMUR_FILENAME = "gallery.wav"
 MURMUR_MAX_SECONDS = 180  # loop a bounded prefix rather than holding the whole file in RAM
 SOLO_FX_DIR = EFFECTS_DIR / "solo_fx"
 SOLO_FX_INDEX_CSV = SOLO_FX_DIR / "index.csv"
+
+
+def list_murmur_files() -> list[str]:
+    """Filenames available in data/effects/murmurs/, for the preflight
+    dialog's dropdown."""
+    return sorted(p.name for p in MURMURS_DIR.glob("*.wav"))
 
 
 def load_audio_file(path: Path, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
@@ -46,16 +53,18 @@ def load_audio_file(path: Path, max_seconds: float | None = None) -> tuple[np.nd
     return data, rate
 
 
-def load_murmur() -> tuple[np.ndarray, int]:
-    """Load (up to MURMUR_MAX_SECONDS of) the background murmur -> (int16
-    mono samples, sample rate). Loaded once per session and looped - capped
-    rather than loading the whole file, since this machine's memory budget
-    is tight enough that a large in-RAM buffer has previously contributed to
-    instability elsewhere in this pipeline (see CLAUDE.md)."""
-    if not MURMUR_FILE.exists():
-        raise FileNotFoundError(f"Murmur file not found: {MURMUR_FILE}")
-    data, rate = load_audio_file(MURMUR_FILE, max_seconds=MURMUR_MAX_SECONDS)
-    print(f"[effects] background murmur for this session: {MURMUR_FILE.name} "
+def load_murmur(filename: str) -> tuple[np.ndarray, int]:
+    """Load (up to MURMUR_MAX_SECONDS of) the named murmur file from
+    data/effects/murmurs/ -> (int16 mono samples, sample rate). Loaded once
+    per session and looped - capped rather than loading the whole file,
+    since this machine's memory budget is tight enough that a large in-RAM
+    buffer has previously contributed to instability elsewhere in this
+    pipeline (see CLAUDE.md)."""
+    path = MURMURS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Murmur file not found: {path}")
+    data, rate = load_audio_file(path, max_seconds=MURMUR_MAX_SECONDS)
+    print(f"[effects] background murmur for this session: {path.name} "
           f"({len(data) / rate:.0f}s loaded, loops)")
     return data, rate
 

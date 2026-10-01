@@ -71,10 +71,13 @@ class UtteranceBank:
         print(f"UtteranceBank: {len(self.meta)} rows, {X.shape[1]}-dim, from {self.csv_path}")
 
     def find_match(self, query_embedding: np.ndarray, img_id: str, exclude_pair_id,
-                    max_duration_seconds: float | None = None) -> pd.Series | None:
+                    max_duration_seconds: float | None = None,
+                    max_distance: float | None = None) -> pd.Series | None:
         """Best cosine match for query_embedding among rows with the same img_id, a
         different pairID than exclude_pair_id, and (if given) a clip no longer than
-        max_duration_seconds. None if there's no candidate row."""
+        max_duration_seconds. None if there's no candidate row, or if the best
+        candidate's cosine distance (1 - similarity) exceeds max_distance - a
+        weak match is worse than no match at all."""
         q = np.asarray(query_embedding, dtype=np.float32)
         q = q / np.linalg.norm(q)
 
@@ -88,9 +91,13 @@ class UtteranceBank:
         sims = self.embeddings @ q
         sims = np.where(candidate.to_numpy(), sims, -np.inf)
         best = int(np.argmax(sims))
+        best_sim = float(sims[best])
+
+        if max_distance is not None and (1.0 - best_sim) > max_distance:
+            return None
 
         row = self.meta.iloc[best].copy()
-        row["similarity"] = float(sims[best])
+        row["similarity"] = best_sim
         return row
 
     def load_audio(self, row: pd.Series, pad: float = 0.1) -> tuple[np.ndarray, int]:

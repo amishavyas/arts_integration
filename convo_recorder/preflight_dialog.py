@@ -22,10 +22,14 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import tkinter as tk
+from tkinter import ttk
 
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
 from audio_devices import find_scarlett_device
+from effects import DEFAULT_MURMUR_FILENAME, list_murmur_files  # no heavy ML deps, safe here
 from session_manager import next_session_number
+
+NO_MURMUR = "No murmur"
 
 WINDOW_W = 760
 WAVE_H = 200
@@ -46,6 +50,10 @@ class PreflightDialog:
         self.data_mode = tk.StringVar(value="real")
         self.intervention_mode = tk.StringVar(value="full")
         self.add_to_database = tk.BooleanVar(value=True)
+
+        self.murmur_options = [NO_MURMUR] + list_murmur_files()
+        default_murmur = DEFAULT_MURMUR_FILENAME if DEFAULT_MURMUR_FILENAME in self.murmur_options else NO_MURMUR
+        self.murmur_var = tk.StringVar(value=default_murmur)
 
         self._build_ui()
 
@@ -100,6 +108,12 @@ class PreflightDialog:
                         value="collection_only").pack(anchor="w")
         tk.Checkbutton(interv_frame, text="Add utterances to database (so future sessions can match against them)",
                        variable=self.add_to_database).pack(anchor="w", pady=(4, 0))
+
+        murmur_row = tk.Frame(interv_frame)
+        murmur_row.pack(fill="x", anchor="w", pady=(4, 0))
+        tk.Label(murmur_row, text="Background murmur:").pack(side="left")
+        ttk.Combobox(murmur_row, textvariable=self.murmur_var, values=self.murmur_options,
+                     state="readonly", width=30).pack(side="left", padx=(6, 0))
 
         btn_frame = tk.Frame(self.root)
         btn_frame.pack(fill="x", **pad)
@@ -171,10 +185,12 @@ class PreflightDialog:
 
     def _on_start(self):
         self._close_stream()
+        murmur_choice = self.murmur_var.get()
         self.result = {
             "devdata": self.data_mode.get() == "devdata",
             "intervention_enabled": self.intervention_mode.get() == "full",
             "add_to_database": self.add_to_database.get(),
+            "murmur_file": None if murmur_choice == NO_MURMUR else murmur_choice,
         }
         self.root.destroy()
 

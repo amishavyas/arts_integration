@@ -2,6 +2,7 @@ import os
 from flask import Blueprint, request, jsonify
 from audio_processor import AudioProcessor, AudioConfig, find_scarlett_device
 from bank import resolve_bank_csv
+from effects import DEFAULT_MURMUR_FILENAME
 from session_manager import setup_session
 
 # Create blueprint
@@ -14,6 +15,10 @@ TEST_MODE = os.environ.get("CONVO_RECORDER_TEST_MODE") == "1"
 DEVDATA_MODE = os.environ.get("CONVO_RECORDER_DEVDATA") == "1"
 INTERVENTION_MODE = os.environ.get("CONVO_RECORDER_INTERVENTION_MODE", "1") == "1"
 ADD_TO_DATABASE = os.environ.get("CONVO_RECORDER_ADD_TO_DATABASE", "1") == "1"
+# Set to "" (not unset) when the preflight dialog's murmur choice is
+# explicitly "No murmur" - distinct from being unset entirely (--test CLI
+# path, no dialog), which falls back to the default file.
+MURMUR_FILE = os.environ.get("CONVO_RECORDER_MURMUR_FILE", DEFAULT_MURMUR_FILENAME) or None
 
 # Only touch the filesystem / audio hardware if a Scarlett is actually
 # connected. Without it, the server still starts (so the frontend can show
@@ -33,6 +38,7 @@ if DEVICE_CONNECTED:
             add_to_database=ADD_TO_DATABASE,
             intervention_enabled=INTERVENTION_MODE,
             bank_csv=resolve_bank_csv(devdata=DEVDATA_MODE),
+            murmur_file=MURMUR_FILE,
         ),
     )
 else:
@@ -48,6 +54,7 @@ def device_status():
         "devdata_mode": DEVDATA_MODE,
         "intervention_mode": INTERVENTION_MODE,
         "add_to_database": ADD_TO_DATABASE,
+        "murmur_file": MURMUR_FILE,
     })
 
 @audio_bp.route('/start_recording', methods=['POST'])
